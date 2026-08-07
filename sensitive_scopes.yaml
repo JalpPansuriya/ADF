@@ -1,0 +1,8 @@
+# Scopes that require explicit human approval before a child token is minted.
+# See PRD Section 8.2. Any /tokens/delegate request containing one of these
+# returns 202 pending_approval and mints NOTHING until a human approves.
+sensitive_scopes:
+  - send_email
+  - spend_money
+  - delete_data
+  - post_public_content

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "langgraph-adf-adapter"
+version = "1.0.0"
+description = "LangGraph integration for the Agent Delegation Firewall Checkpoint Service"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx==0.28.1",
+]
+
+[project.optional-dependencies]
+# LangGraph itself is optional: the guard works on any function taking a state
+# dict, so the adapter is useful (and testable) without pulling in the framework.
+langgraph = ["langgraph>=0.2.0"]
+
+[tool.setuptools]
+# The package source sits alongside this pyproject.toml rather than in a nested
+# directory of the same name, so map the package name onto "." explicitly.
+# Keeps `pip install -e ./langgraph_adf_adapter` working as documented in PRD 16.6.
+packages = ["langgraph_adf_adapter"]
+
+[tool.setuptools.package-dir]
+langgraph_adf_adapter = "."

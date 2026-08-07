@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-slate-950 text-slate-100 antialiased;
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+/* react-d3-tree renders raw SVG; these give nodes a consistent look with the
+   rest of the UI without fighting the library's inline styles. */
+.adf-tree .rd3t-link {
+  stroke: #475569;
+  stroke-width: 1.5px;
+}

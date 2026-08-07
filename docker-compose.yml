@@ -1,0 +1,82 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: adf
+      POSTGRES_PASSWORD: adf
+      POSTGRES_DB: adf
+    volumes:
+      - adf_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U adf -d adf"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # Not published to the host by default: the audit log and revocation store are
+    # the durable security record. Uncomment only for local inspection.
+    # ports:
+    #   - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    # appendonly is belt-and-braces only. Redis is a cache here; Postgres is the
+    # source of truth for revocations, so losing this volume cannot resurrect a
+    # revoked token. See agent-files/DECISIONS.md.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - adf_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ADF_DATABASE_URL: postgresql+psycopg://adf:adf@postgres:5432/adf
+      ADF_REDIS_URL: redis://redis:6379/0
+      # Required. The service refuses to boot without real values; there are no
+      # defaults. Generate with:
+      #   python -c "import secrets; print(secrets.token_urlsafe(48))"
+      ADF_ADMIN_API_KEY: ${ADF_ADMIN_API_KEY:?set ADF_ADMIN_API_KEY in .env}
+      ADF_JWT_SECRET: ${ADF_JWT_SECRET:?set ADF_JWT_SECRET in .env}
+      ADF_PII_SALT: ${ADF_PII_SALT:?set ADF_PII_SALT in .env}
+      ADF_CORS_ORIGINS: http://localhost:5173,http://localhost:8080
+      # MUST be empty in production: an exempt agent is an unthrottled identity.
+      ADF_GUARDRAIL_EXEMPT_AGENTS: ""
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+      args:
+        # Baked in at build time (Vite inlines env vars), so the browser talks to
+        # the API directly rather than through the dashboard container.
+        VITE_ADF_API_URL: http://localhost:8000
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  adf_pgdata:
+  adf_redisdata:
