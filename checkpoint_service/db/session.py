@@ -25,6 +25,24 @@ def _is_sqlite(url: str) -> bool:
     return url.startswith("sqlite")
 
 
+def _is_transaction_pooler(url: str) -> bool:
+    """Heuristic: is this a connection-multiplexing pooler in transaction mode?
+
+    Supabase's pooler (``*.pooler.supabase.com``) and PgBouncer conventionally
+    listen on 6543 in transaction mode, where each transaction may land on a
+    different backend connection. Server-side prepared statements are scoped to a
+    backend, so a client that caches them observes
+    ``prepared statement "_pg3_N" does not exist`` or ``already exists`` as soon
+    as it is routed elsewhere -- which is exactly what happened against Supabase.
+    """
+    lowered = url.lower()
+    return (
+        "pooler.supabase.com" in lowered
+        or ":6543/" in lowered
+        or "pgbouncer=true" in lowered
+    )
+
+
 def init_engine(database_url: str, *, echo: bool = False) -> Engine:
     """Create (or replace) the process-wide engine and session factory."""
     global _engine, _SessionLocal
@@ -37,6 +55,17 @@ def init_engine(database_url: str, *, echo: bool = False) -> Engine:
         kwargs["poolclass"] = StaticPool
     else:
         kwargs["pool_pre_ping"] = True
+        connect_args: dict = {"connect_timeout": 30}
+        if _is_transaction_pooler(database_url):
+            # Disable psycopg's prepared-statement cache. Without this every
+            # INSERT eventually fails once the pooler reassigns the connection.
+            connect_args["prepare_threshold"] = None
+            # The pooler already multiplexes, so a large client-side pool adds
+            # little; keep it modest and recycle to avoid stale handles.
+            kwargs["pool_size"] = 5
+            kwargs["max_overflow"] = 5
+            kwargs["pool_recycle"] = 1800
+        kwargs["connect_args"] = connect_args
 
     engine = create_engine(database_url, **kwargs)
 
