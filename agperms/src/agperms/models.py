@@ -10,6 +10,7 @@ claim is a hard error rather than a silently-ignored extra.
 from __future__ import annotations
 
 import datetime as _dt
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -32,6 +33,60 @@ class CompletionState(str, Enum):
 
     def needs_human_review(self) -> bool:
         return self is not CompletionState.CLEAN
+
+
+class Reversibility(str, Enum):
+    """How recoverable an action's effect is, if it turns out to be wrong.
+
+    The taxonomy is from *Revisable by Design: A Theory of Streaming LLM Agent
+    Execution* (arXiv:2604.23283), whose central result is that an agent's
+    flexibility is bounded by its reversibility -- conflicting irreversible
+    actions make full specification satisfaction impossible, and that is a
+    property of the action space rather than of any algorithm. If that is true,
+    reversibility belongs in the policy that hands out capabilities, not only in
+    a post-hoc report.
+
+    This is orthogonal to :class:`CompletionState`. Completion state answers
+    *did it finish*; reversibility answers *how bad is it if it did the wrong
+    thing*. An UNKNOWN idempotent read and an UNKNOWN funds transfer are the
+    same completion state and nowhere near the same problem.
+    """
+
+    #: Repeating it changes nothing. A read, a status check.
+    IDEMPOTENT = "IDEMPOTENT"
+    #: A true undo exists and restores the prior state.
+    REVERSIBLE = "REVERSIBLE"
+    #: No undo, but a corrective action exists -- a refund after a charge.
+    COMPENSABLE = "COMPENSABLE"
+    #: No undo and no compensation. A sent email cannot be unsent.
+    IRREVERSIBLE = "IRREVERSIBLE"
+
+    @property
+    def rank(self) -> int:
+        """Severity order: 0 is fully recoverable, 3 is unrecoverable.
+
+        Comparison operators are deliberately *not* overridden. This is a
+        ``str`` enum, so ``str.__lt__``/``__gt__`` already exist and would order
+        members alphabetically (COMPENSABLE < IDEMPOTENT < IRREVERSIBLE <
+        REVERSIBLE) -- which is not the severity order and is not worth the
+        confusion of a partial override. Sort and compare on ``.rank``
+        explicitly: ``max(members, key=lambda r: r.rank)``.
+        """
+        return _REVERSIBILITY_RANK[self.value]
+
+
+def worst_of(classes: "Iterable[Reversibility]") -> "Reversibility | None":
+    """The least recoverable member of ``classes``, or ``None`` if empty."""
+    ranked = sorted(classes, key=lambda r: r.rank)
+    return ranked[-1] if ranked else None
+
+
+_REVERSIBILITY_RANK = {
+    "IDEMPOTENT": 0,
+    "REVERSIBLE": 1,
+    "COMPENSABLE": 2,
+    "IRREVERSIBLE": 3,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +372,11 @@ class ActionRecord:
     finished_at: _dt.datetime | None = None
     state: CompletionState | None = None
     failure_reason: str | None = None
+    #: How recoverable this action's effect is. Defaults to the worst case: an
+    #: unclassified scope is assumed unrecoverable, for the same reason an action
+    #: with no closing record is UNKNOWN rather than CLEAN -- the library does not
+    #: guess in the direction that happens to be convenient.
+    reversibility: Reversibility = Reversibility.IRREVERSIBLE
 
     @property
     def is_open(self) -> bool:
@@ -425,8 +485,10 @@ __all__ = [
     "IntegrityReport",
     "PendingApproval",
     "RevocationResult",
+    "Reversibility",
     "Subject",
     "TokenClaims",
     "TokenMetadata",
     "VerifyResult",
+    "worst_of",
 ]

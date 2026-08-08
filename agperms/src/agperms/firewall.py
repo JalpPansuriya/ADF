@@ -56,6 +56,7 @@ from agperms.models import (
     IntegrityReport,
     PendingApproval,
     RevocationResult,
+    Reversibility,
     TokenClaims,
     TokenMetadata,
     VerifyResult,
@@ -73,13 +74,21 @@ class ActionHandle:
     lets a caller attach a note describing what the action actually did.
     """
 
-    __slots__ = ("action_id", "jti", "name", "scope", "_notes")
+    __slots__ = ("action_id", "jti", "name", "scope", "reversibility", "_notes")
 
-    def __init__(self, action_id: str, jti: str, name: str, scope: str) -> None:
+    def __init__(
+        self,
+        action_id: str,
+        jti: str,
+        name: str,
+        scope: str,
+        reversibility: Reversibility = Reversibility.IRREVERSIBLE,
+    ) -> None:
         self.action_id = action_id
         self.jti = jti
         self.name = name
         self.scope = scope
+        self.reversibility = reversibility
         self._notes: list[str] = []
 
     def note(self, text: str) -> None:
@@ -436,7 +445,12 @@ class Firewall:
     # ==================================================================
     @contextmanager
     def action(
-        self, token: str, *, scope: str, name: str
+        self,
+        token: str,
+        *,
+        scope: str,
+        name: str,
+        reversibility: Reversibility | None = None,
     ) -> Iterator[ActionHandle]:
         """Declare a side-effecting action so a revoke can classify it.
 
@@ -449,6 +463,12 @@ class Firewall:
         action at all. Records that the action opened, then records whether it
         finished cleanly or raised.
 
+        ``reversibility`` defaults to whatever ``Config.scope_reversibility`` says
+        about ``scope`` (IRREVERSIBLE if the scope is unclassified). Pass it
+        explicitly for the case where one scope covers both a recoverable and an
+        unrecoverable path -- a soft delete and a hard delete under one
+        ``delete_data`` grant.
+
         **This does not stop or interrupt anything.** It cannot: the library has
         no way to halt code already running in your process. What it buys you is
         knowledge -- if this token is revoked while the block is open, the revoke
@@ -457,6 +477,12 @@ class Firewall:
         """
         claims = self.require(token, scope)
         self._rate.check(claims.sub, "action")
+
+        resolved_reversibility = (
+            reversibility
+            if reversibility is not None
+            else self.config.reversibility_of(scope)
+        )
 
         action_id = str(uuid.uuid4())
         started_at = utcnow()
@@ -467,6 +493,7 @@ class Firewall:
             name=name,
             scope=scope,
             started_at=started_at,
+            reversibility=resolved_reversibility,
         )
         self.storage.put_action(record)
         # Synchronous on purpose: the *absence* of this row is what a revoke
@@ -481,11 +508,17 @@ class Firewall:
                 required_scope=scope,
                 decision="allow",
                 depth=claims.depth,
-                detail={"action_id": action_id, "action_name": name},
+                detail={
+                    "action_id": action_id,
+                    "action_name": name,
+                    "reversibility": resolved_reversibility.value,
+                },
             )
         )
 
-        handle = ActionHandle(action_id, claims.jti, name, scope)
+        handle = ActionHandle(
+            action_id, claims.jti, name, scope, resolved_reversibility
+        )
         try:
             yield handle
         except BaseException as exc:
@@ -522,6 +555,7 @@ class Firewall:
             "action_id": handle.action_id,
             "action_name": handle.name,
             "completion_state": state.value,
+            "reversibility": handle.reversibility.value,
         }
         if handle.notes:
             detail["notes"] = handle.notes
@@ -632,6 +666,8 @@ class Firewall:
                         "action_id": action.action_id,
                         "action_name": action.name,
                         "completion_state": classification.value,
+                        "reversibility": action.reversibility.value,
+                        "review_priority": review_priority(action),
                     },
                 )
             )
@@ -641,11 +677,42 @@ class Firewall:
     # ==================================================================
     # Review queue
     # ==================================================================
-    def pending_reviews(self, *, include_resolved: bool = False) -> list[ActionReview]:
-        """Actions that were mid-flight when their capability was revoked."""
+    def pending_reviews(
+        self,
+        *,
+        include_resolved: bool = False,
+        order_by_priority: bool = False,
+    ) -> list[ActionReview]:
+        """Actions that were mid-flight when their capability was revoked.
+
+        With ``order_by_priority``, the most urgent come first: UNKNOWN outranks
+        PARTIAL, and within a completion state a less recoverable action outranks
+        a more recoverable one. An UNKNOWN funds transfer should not be buried
+        under a page of UNKNOWN idempotent reads.
+        """
         if include_resolved:
-            return self.storage.list_reviews()
-        return self.storage.list_reviews(reviewed=False)
+            reviews = self.storage.list_reviews()
+        else:
+            reviews = self.storage.list_reviews(reviewed=False)
+        if not order_by_priority:
+            return reviews
+
+        def priority(review: ActionReview) -> tuple[int, int]:
+            action = self.storage.get_action(review.action_id)
+            # A review whose action row has gone missing keeps its recorded
+            # classification but loses reversibility detail; rank it worst-case
+            # rather than dropping it to the bottom of the queue.
+            reversibility = (
+                action.reversibility
+                if action is not None
+                else Reversibility.IRREVERSIBLE
+            )
+            return (
+                _COMPLETION_URGENCY[review.classification],
+                reversibility.rank,
+            )
+
+        return sorted(reviews, key=priority, reverse=True)
 
     def resolve_review(
         self, review_id: str, *, note: str, reviewed_by: str
@@ -1127,4 +1194,31 @@ def classify_action(action: ActionRecord) -> CompletionState:
     return action.state
 
 
-__all__ = ["ActionHandle", "Firewall", "classify_action"]
+#: How badly each completion state wants a human, independent of reversibility.
+#: UNKNOWN outranks PARTIAL because PARTIAL at least tells you the action raised;
+#: UNKNOWN tells you nothing at all.
+_COMPLETION_URGENCY = {
+    CompletionState.UNKNOWN: 2,
+    CompletionState.PARTIAL: 1,
+    CompletionState.CLEAN: 0,
+}
+
+
+def review_priority(action: ActionRecord) -> int:
+    """Sort key for a review queue. Higher means more urgent.
+
+    Combines the two independent facts the library holds about a questionable
+    action: how little is known about whether it finished
+    (:func:`classify_action`) and how little can be done about it if it did the
+    wrong thing (:class:`~agperms.models.Reversibility`). Completion state
+    dominates -- the ``* 10`` spacing means no reversibility class can lift a
+    PARTIAL above an UNKNOWN -- because "we do not know what happened" is a
+    worse position than "we know it failed", whatever the action was.
+
+    Pure, for the same reason :func:`classify_action` is pure: it is a policy
+    rule and should be testable without a store.
+    """
+    return _COMPLETION_URGENCY[classify_action(action)] * 10 + action.reversibility.rank
+
+
+__all__ = ["ActionHandle", "Firewall", "classify_action", "review_priority"]

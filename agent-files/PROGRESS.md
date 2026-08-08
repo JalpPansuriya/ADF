@@ -5,11 +5,12 @@
 # AGENT: This file is your memory across sessions. Keep it accurate.
 
 ## Repo State
-- Latest verified commit: `9433082` (results-remote.md), remote
-  `https://github.com/JalpPansuriya/ADF.git`, branch `main`. The `agperms` library and the
-  Study Material folder are **on disk but not yet committed** — see Next Steps.
-- `pytest -q` status: **848 passed, 0 failed** (hosted service, verified 2026-08-08, ~49s)
-- `pytest agperms/tests -q` status: **366 passed, 0 failed** (embeddable library, ~2s)
+- Latest verified commit: `4fb3d17` (agperms), remote
+  `https://github.com/JalpPansuriya/ADF.git`, branch `main`. **F17 (reversibility typing +
+  risk-state vector) is on disk and not yet committed** — see Next Steps.
+- `pytest -q` status: **848 passed, 0 failed** (hosted service, verified 2026-08-08, ~44s)
+- `pytest agperms/tests -q` status: **430 passed, 0 failed** (embeddable library, ~2s;
+  was 366 before F17)
 - `python -m tests.check_boundaries`: **all 5 checks pass**
 - `python -c "import checkpoint_service.main"`: **OK**
 - `cd dashboard && npx tsc --noEmit`: **0 errors**
@@ -29,14 +30,34 @@
 - Two primary gates now: `pytest -q` (service) and `pytest agperms/tests -q` (library).
 
 ## Current Active Feature
-- None. F16 (`agperms`) is complete and passing.
+- None. F17 (reversibility typing + risk-state vector) is complete and passing.
 - **WIP=1 applies.** Any follow-up work must set exactly one `not_started`/`blocked`
   feature in `features.md` to `active` before touching code. The only outstanding one is
   F13 (docker compose).
 
 ## Recently Completed
-All sixteen features are `passing` except F13 (blocked) — see `features.md` for
-per-feature verification and numbers. This session added F16:
+All seventeen features are `passing` except F13 (blocked) — see `features.md` for
+per-feature verification and numbers. This session added F17:
+
+- [x] **F17: Reversibility-typed scopes** — every scope carries a recoverability class
+      (`IDEMPOTENT`/`REVERSIBLE`/`COMPENSABLE`/`IRREVERSIBLE`, taxonomy from
+      arXiv:2604.23283), declared in `Config.scope_reversibility`, overridable per
+      `fw.action(...)` call, persisted on `ActionRecord` through both backends. Drives
+      `review_priority()` and `pending_reviews(order_by_priority=True)` so an UNKNOWN funds
+      transfer outranks an UNKNOWN calendar read. Research confirmed the taxonomy exists as
+      theory but nobody wires it into grant-time policy.
+- [x] **Insurable risk-state vector** — `compute_risk_state()` returns `s = (α, β, η, g, v)`
+      from arXiv:2607.13230 (Zhu, NYU, July 2026), which had zero reference
+      implementations. Pure read-only over the existing audit log: no new `Storage`
+      protocol methods, no schema migration. Only β and η are measured; g is a five-check
+      self-assessment, α an explicit heuristic capped at 3, and v is caller-supplied or
+      `None` because a permission library cannot observe a vendor mix.
+- [x] **A real bug found and pinned** — the first `Reversibility` cut defined only
+      `__lt__`, but `max()` dispatches on `__gt__`, which the `str` mixin already supplies
+      *alphabetically*; `max()` returned `REVERSIBLE` from a set containing `IRREVERSIBLE`.
+      Fixed by dropping the operator override for an explicit `worst_of()` helper, and
+      `test_worst_of_returns_worst_case` now asserts bare `max()` is wrong so nobody
+      "simplifies" it back.
 
 - [x] **F16: `agperms` embeddable library** — `pip install agperms` gives an in-process
       `Firewall` with zero external dependencies. Answers the question the hosted service
@@ -127,6 +148,16 @@ Earlier sessions:
 15. `verify_success` audit rows are buffered in the *service* (not the library), so a hard
     crash can lose up to `ADF_AUDIT_BUFFER_MAX_SIZE` of them. Denials and mints are
     synchronous. Deliberate, documented trade — see DECISIONS.md.
+16. The risk-state vector (`compute_risk_state`) measures only **β** and **η** honestly.
+    **g** scores five things agperms can verify about itself and is *not* an organisational
+    governance audit; **α** is an explicit heuristic whose ceiling is 3 (cyber-physical is
+    unreachable from scope names); **v** is not observable by a permission library and stays
+    `None` unless the caller supplies `dependency_shares`. It is an underwriting *input*,
+    never a premium. All stated in the README and the module docstring.
+17. Overriding `Config.scope_reversibility` **replaces** the map wholesale rather than
+    merging with `DEFAULT_SCOPE_REVERSIBILITY`, so a caller who sets one scope loses the six
+    built-in classifications (they then resolve to `IRREVERSIBLE` by the fail-closed rule).
+    Tested and documented; a partial merge would make it unclear which class applied.
 
 ## Settled Questions
 <!-- Things a future session might otherwise re-litigate. -->
@@ -137,10 +168,24 @@ Earlier sessions:
   UI, keeping the HS256 signing key off every verifier, and enforcing against an
   untrusted agent process. Full reasoning and rejected alternatives in DECISIONS.md
   2026-08-08.
+- **"Why aren't `sensitive_scopes` and `scope_reversibility` one map?" Because
+  `spend_money` breaks it.** That scope warrants an approval gate *and* is normally
+  refundable — sensitive but `COMPENSABLE`. `transfer_funds` is sensitive and
+  `IRREVERSIBLE`. One map cannot carry both facts without becoming a tuple, i.e. two maps
+  wearing one name. Pinned by
+  `test_sensitive_and_reversibility_are_independent_maps`.
+- **"Why no `__lt__` on `Reversibility`?" Because a partial override is a live bug.**
+  It is a `str` enum, so `max()` uses the mixin's alphabetical `__gt__` unless *every*
+  comparison is overridden. Use `worst_of(...)` or `key=lambda r: r.rank`. See DECISIONS.md
+  2026-08-08 and `test_worst_of_returns_worst_case`, which asserts bare `max()` is wrong.
+- **"Should counterfactual receipts ship?" Not yet, and not with HMAC.** They need Ed25519
+  (a second hard dependency after PyJWT) plus a key-distribution model. An HMAC-signed
+  receipt is forgeable by anyone who can verify it, which is worse than no feature because
+  it looks like evidence. Design recorded in DECISIONS.md 2026-08-08.
 
 ## Next Steps
 <!-- Ordered. The next session starts at item 1. -->
-1. **Commit and push `agperms/`**, the `Study Material/` folder, and the updated docs.
+1. **Commit and push F17** (reversibility typing + risk-state vector) and the updated docs.
    Nothing from this session is in git yet.
 2. **Run the Layer-3 check** (Known Issue 1):
    `docker compose up -d --build`, then `curl -fsS http://localhost:8000/health`,

@@ -15,6 +15,7 @@ from agperms import (
     Config,
     Firewall,
     MemoryStorage,
+    Reversibility,
     ScopeEscalationDenied,
     StorageError,
 )
@@ -184,6 +185,54 @@ class TestActionsOnBothBackends:
         rows = fw.audit_events(action="review_resolved")
         assert rows[0]["detail"]["note"] == "checked, safe"
         assert fw.verify_audit_integrity().intact
+
+    def test_reversibility_round_trips(self, fw: Firewall):
+        """Both backends must persist the recoverability class, not drop it."""
+        root = fw.mint_root(subject="alice", scopes=["s"])
+        with fw.action(
+            root.token,
+            scope="s",
+            name="compensable_work",
+            reversibility=Reversibility.COMPENSABLE,
+        ) as act:
+            pass
+        stored = fw.storage.get_action(act.action_id)
+        assert stored is not None
+        assert stored.reversibility is Reversibility.COMPENSABLE
+
+    def test_reversibility_survives_close_on_both_backends(self, fw: Firewall):
+        """close_action must not reset the class to the default."""
+        root = fw.mint_root(subject="alice", scopes=["s"])
+        with pytest.raises(RuntimeError):
+            with fw.action(
+                root.token,
+                scope="s",
+                name="boom",
+                reversibility=Reversibility.REVERSIBLE,
+            ):
+                raise RuntimeError("x")
+        reviews = fw.revoke(root.jti).reviews
+        stored = fw.storage.get_action(reviews[0].action_id)
+        assert stored is not None
+        assert stored.state is CompletionState.PARTIAL
+        assert stored.reversibility is Reversibility.REVERSIBLE
+
+    def test_unset_reversibility_reads_back_as_irreversible(self, fw: Firewall):
+        """A row written without a class must not read back as safe."""
+        root = fw.mint_root(subject="alice", scopes=["s"])
+        fw.storage.put_action(
+            ActionRecord(
+                action_id="legacy",
+                jti=root.jti,
+                subject_id=root.claims.sub,
+                name="legacy_action",
+                scope="s",
+                started_at=utcnow(),
+            )
+        )
+        stored = fw.storage.get_action("legacy")
+        assert stored is not None
+        assert stored.reversibility is Reversibility.IRREVERSIBLE
 
 
 class TestSqlSpecifics:

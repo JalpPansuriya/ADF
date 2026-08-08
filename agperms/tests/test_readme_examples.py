@@ -153,3 +153,92 @@ def test_documented_truncation_limit():
     from agperms._time import truncate_reason
 
     assert len(truncate_reason("x" * 5_000)) == 200
+
+
+def test_reversibility_example():
+    """The README's Reversibility typing section, executed."""
+    from agperms import Reversibility
+
+    fw = Firewall(
+        config=Config(
+            jwt_secret="readme-secret",
+            pii_salt="readme-salt",
+            scope_reversibility={
+                "read_calendar": Reversibility.IDEMPOTENT,
+                "draft_email": Reversibility.REVERSIBLE,
+                "charge_card": Reversibility.COMPENSABLE,
+                "send_email": Reversibility.IRREVERSIBLE,
+            },
+        )
+    )
+    root = fw.mint_root(
+        subject="alice", scopes=["read_calendar", "delete_data"]
+    )
+
+    # Per-call override, as documented.
+    with fw.action(
+        root.token,
+        scope="delete_data",
+        name="soft_delete",
+        reversibility=Reversibility.REVERSIBLE,
+    ) as act:
+        assert act.reversibility is Reversibility.REVERSIBLE
+
+    # The documented fail-closed default.
+    assert fw.config.reversibility_of("unlisted") is Reversibility.IRREVERSIBLE
+
+    # The documented priority ordering, and that it is opt-in.
+    handle = fw.action(root.token, scope="read_calendar", name="left_open")
+    handle.__enter__()
+    fw.revoke(root.jti)
+    assert fw.pending_reviews(order_by_priority=True)
+
+
+def test_documented_reversibility_defaults():
+    """The README's class table for the default sensitive scopes."""
+    from agperms import Reversibility
+
+    config = Config()
+    assert config.reversibility_of("spend_money") is Reversibility.COMPENSABLE
+    assert config.reversibility_of("transfer_funds") is Reversibility.IRREVERSIBLE
+    assert config.reversibility_of("send_email") is Reversibility.IRREVERSIBLE
+    # The README claims these are separate maps; prove spend_money is both
+    # gated and compensable, which a merged map could not express.
+    assert config.is_sensitive("spend_money")
+
+
+def test_risk_state_example():
+    """The README's Risk-state vector section, executed."""
+    from agperms import compute_risk_state
+
+    fw = Firewall(
+        config=Config(jwt_secret="readme-secret", pii_salt="readme-salt")
+    )
+    root = fw.mint_root(subject="alice", scopes=["read_calendar", "send_email"])
+    with fw.action(root.token, scope="read_calendar", name="r"):
+        pass
+
+    state = compute_risk_state(fw, root.claims.sub)
+    assert 0.0 <= state.beta <= 1.0
+    assert state.eta_exposure > 0
+    assert 0 <= state.governance_tier <= 5
+    assert isinstance(state.to_dict(), dict)
+
+    # The documented honesty claims.
+    assert state.dependency_shares is None
+    assert state.dependency_concentration is None
+    assert state.alpha <= 3, "README states alpha(4) is unreachable"
+    assert set(state.governance_evidence), "evidence must be inspectable"
+
+
+def test_risk_state_beta_is_none_not_zero():
+    """The README states beta is None when nothing was observed."""
+    from agperms import compute_risk_state
+
+    fw = Firewall(
+        config=Config(jwt_secret="readme-secret", pii_salt="readme-salt")
+    )
+    root = fw.mint_root(subject="alice", scopes=["read_calendar"])
+    state = compute_risk_state(fw, root.claims.sub)
+    assert state.beta is None
+    assert state.beta != 0.0

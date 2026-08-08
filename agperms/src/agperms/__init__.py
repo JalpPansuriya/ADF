@@ -33,7 +33,11 @@ survive a restart. See the README for the durable setup.
 
 from __future__ import annotations
 
-from agperms.config import DEFAULT_SENSITIVE_SCOPES, Config
+from agperms.config import (
+    DEFAULT_SCOPE_REVERSIBILITY,
+    DEFAULT_SENSITIVE_SCOPES,
+    Config,
+)
 from agperms.errors import (
     AgpermsError,
     ApprovalRequired,
@@ -48,7 +52,12 @@ from agperms.errors import (
     StorageError,
     TokenError,
 )
-from agperms.firewall import ActionHandle, Firewall, classify_action
+from agperms.firewall import (
+    ActionHandle,
+    Firewall,
+    classify_action,
+    review_priority,
+)
 from agperms.models import (
     ActionRecord,
     ActionReview,
@@ -59,10 +68,12 @@ from agperms.models import (
     IntegrityReport,
     PendingApproval,
     RevocationResult,
+    Reversibility,
     TokenClaims,
     TokenMetadata,
     VerifyResult,
 )
+from agperms.risk import PERMISSION_WEIGHTS, RiskState, compute_risk_state
 from agperms.storage.memory import MemoryStorage
 
 __version__ = "0.1.0"
@@ -79,6 +90,7 @@ __all__ = [
     "CompletionState",
     "Config",
     "ConfigurationError",
+    "DEFAULT_SCOPE_REVERSIBILITY",
     "DEFAULT_SENSITIVE_SCOPES",
     "DelegationChainEntry",
     "Denied",
@@ -86,10 +98,13 @@ __all__ = [
     "Firewall",
     "IntegrityReport",
     "MemoryStorage",
+    "PERMISSION_WEIGHTS",
     "ParentTokenInvalid",
     "PendingApproval",
     "RateLimitExceeded",
     "RevocationResult",
+    "Reversibility",
+    "RiskState",
     "RootChainBroken",
     "ScopeEscalationDenied",
     "StorageError",
@@ -99,4 +114,6 @@ __all__ = [
     "VerifyResult",
     "__version__",
     "classify_action",
+    "compute_risk_state",
+    "review_priority",
 ]

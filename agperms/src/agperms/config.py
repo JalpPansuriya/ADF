@@ -12,6 +12,7 @@ import secrets
 from dataclasses import dataclass, field, replace
 
 from agperms.errors import ConfigurationError
+from agperms.models import Reversibility, worst_of
 
 #: Scopes that require human approval before a child token is minted. Chosen as
 #: a conservative default: irreversible, externally-visible, or money-moving.
@@ -25,6 +26,25 @@ DEFAULT_SENSITIVE_SCOPES: frozenset[str] = frozenset(
         "execute_code",
     }
 )
+
+#: How recoverable each default-sensitive scope is. Deliberately a *separate* map
+#: from :data:`DEFAULT_SENSITIVE_SCOPES` rather than a richer replacement for it,
+#: because the two answer different questions: sensitivity decides whether a
+#: human must approve the grant, reversibility decides how bad it is if the
+#: action goes wrong. ``spend_money`` shows why they must not be merged -- it
+#: warrants an approval gate *and* is usually refundable, so it is COMPENSABLE
+#: rather than IRREVERSIBLE, while ``transfer_funds`` has no clawback.
+#:
+#: Scopes absent from this map resolve to IRREVERSIBLE, not to a permissive
+#: default. See :meth:`Config.reversibility_of`.
+DEFAULT_SCOPE_REVERSIBILITY: dict[str, Reversibility] = {
+    "send_email": Reversibility.IRREVERSIBLE,
+    "spend_money": Reversibility.COMPENSABLE,
+    "delete_data": Reversibility.IRREVERSIBLE,
+    "post_public_content": Reversibility.IRREVERSIBLE,
+    "transfer_funds": Reversibility.IRREVERSIBLE,
+    "execute_code": Reversibility.IRREVERSIBLE,
+}
 
 
 @dataclass(frozen=True)
@@ -57,6 +77,13 @@ class Config:
     # --- approval gate -----------------------------------------------------
     sensitive_scopes: frozenset[str] = DEFAULT_SENSITIVE_SCOPES
     approval_timeout_seconds: int = 300
+
+    # --- reversibility typing ----------------------------------------------
+    #: Per-scope recoverability class. A scope missing from this map is treated
+    #: as IRREVERSIBLE rather than assumed safe.
+    scope_reversibility: dict[str, Reversibility] = field(
+        default_factory=lambda: dict(DEFAULT_SCOPE_REVERSIBILITY)
+    )
 
     # --- rate limiting -----------------------------------------------------
     rate_limit_delegate_per_min: int = 60
@@ -93,6 +120,12 @@ class Config:
         default_factory=set, repr=False, compare=False
     )
 
+    # Set during __post_init__ when jwt_secret was left empty and had to be
+    # generated. Recorded because after generation the field is indistinguishable
+    # from a caller-supplied secret, and "is this key ephemeral" is a question
+    # governance scoring needs to answer honestly.
+    _secret_generated: bool = field(default=False, repr=False, compare=False)
+
     def __post_init__(self) -> None:
         if self.max_delegation_depth < 1:
             raise ConfigurationError("max_delegation_depth must be >= 1")
@@ -110,12 +143,24 @@ class Config:
         # Frozen dataclass: use object.__setattr__ to fill generated defaults.
         if not self.jwt_secret:
             object.__setattr__(self, "jwt_secret", secrets.token_urlsafe(48))
+            object.__setattr__(self, "_secret_generated", True)
         if not self.pii_salt:
             object.__setattr__(self, "pii_salt", secrets.token_urlsafe(16))
         object.__setattr__(
             self, "sensitive_scopes", frozenset(self.sensitive_scopes)
         )
         object.__setattr__(self, "exempt_agents", frozenset(self.exempt_agents))
+        # Copy so a caller mutating the dict they passed in cannot retroactively
+        # change this firewall's policy. Coerce str values so a caller can pass
+        # plain strings from config files.
+        object.__setattr__(
+            self,
+            "scope_reversibility",
+            {
+                str(scope): Reversibility(value)
+                for scope, value in self.scope_reversibility.items()
+            },
+        )
 
     # ------------------------------------------------------------------
     def is_exempt(self, agent_id: str | None) -> bool:
@@ -136,12 +181,35 @@ class Config:
     def is_sensitive(self, scope: str) -> bool:
         return scope in self.sensitive_scopes
 
+    @property
+    def signing_key_is_ephemeral(self) -> bool:
+        """True when no ``jwt_secret`` was supplied and one was generated.
+
+        An ephemeral key means tokens cannot be verified after a restart or by
+        another process, which is a real governance limitation rather than a
+        detail -- so it stays answerable after construction.
+        """
+        return self._secret_generated
+
     def sensitive_subset(self, scopes: list[str]) -> list[str]:
         return sorted(s for s in scopes if s in self.sensitive_scopes)
+
+    def reversibility_of(self, scope: str) -> Reversibility:
+        """How recoverable ``scope`` is. Unknown scopes are IRREVERSIBLE.
+
+        Fail closed: a scope nobody classified is more likely to be a new
+        side-effecting capability than a harmless read, and mislabelling a
+        dangerous action as safe is the expensive direction of the error.
+        """
+        return self.scope_reversibility.get(scope, Reversibility.IRREVERSIBLE)
+
+    def worst_reversibility(self, scopes: list[str]) -> Reversibility | None:
+        """The least recoverable class among ``scopes``, or ``None`` if empty."""
+        return worst_of(self.reversibility_of(s) for s in scopes)
 
     def with_overrides(self, **changes: object) -> "Config":
         """Return a copy with ``changes`` applied (frozen-dataclass friendly)."""
         return replace(self, **changes)  # type: ignore[arg-type]
 
 
-__all__ = ["Config", "DEFAULT_SENSITIVE_SCOPES"]
+__all__ = ["Config", "DEFAULT_SCOPE_REVERSIBILITY", "DEFAULT_SENSITIVE_SCOPES"]

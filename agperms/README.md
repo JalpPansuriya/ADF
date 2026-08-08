@@ -96,6 +96,109 @@ for review in fw.pending_reviews():
     )
 ```
 
+## Reversibility typing
+
+`CLEAN`/`PARTIAL`/`UNKNOWN` says whether an action finished. It says nothing
+about how bad it is if the action did the wrong thing. An `UNKNOWN` calendar read
+and an `UNKNOWN` wire transfer are the same completion state and nowhere near the
+same problem.
+
+Every scope carries a recoverability class, from the taxonomy in
+[*Revisable by Design*](https://arxiv.org/abs/2604.23283) (arXiv:2604.23283):
+
+| Class | Means | Example |
+|---|---|---|
+| `IDEMPOTENT` | Repeating it changes nothing | a read, a status check |
+| `REVERSIBLE` | A true undo exists | create then delete a draft |
+| `COMPENSABLE` | No undo, but a correction exists | refund after a charge |
+| `IRREVERSIBLE` | No undo, no compensation | a sent email |
+
+**A scope nobody classified is `IRREVERSIBLE`**, not assumed safe — the same
+fail-closed reasoning that makes an unclosed action `UNKNOWN`.
+
+```python
+from agperms import Config, Reversibility
+
+fw = Firewall(config=Config(scope_reversibility={
+    "read_calendar": Reversibility.IDEMPOTENT,
+    "draft_email":   Reversibility.REVERSIBLE,
+    "charge_card":   Reversibility.COMPENSABLE,
+    "send_email":    Reversibility.IRREVERSIBLE,
+}))
+```
+
+Override per call when one scope covers both a recoverable and an unrecoverable
+path — a soft delete and a hard delete under one `delete_data` grant:
+
+```python
+with fw.action(token, scope="delete_data", name="soft_delete",
+               reversibility=Reversibility.REVERSIBLE):
+    mark_deleted(row)
+```
+
+What it buys you: a review queue sorted by how much trouble you are actually in.
+
+```python
+for review in fw.pending_reviews(order_by_priority=True):
+    ...  # UNKNOWN + IRREVERSIBLE first, CLEAN-adjacent noise last
+```
+
+Completion state dominates recoverability in that ordering: no reversibility
+class lifts a `PARTIAL` above an `UNKNOWN`, because "we don't know what happened"
+is a worse position than "we know it failed", whatever the action was.
+
+`scope_reversibility` is deliberately a **separate** map from `sensitive_scopes`.
+They answer different questions — *must a human approve this grant* versus *how
+bad is it if it goes wrong*. `spend_money` is the case that proves they can't be
+merged: it warrants an approval gate **and** is usually refundable, so it is
+`COMPENSABLE`, while `transfer_funds` has no clawback and is `IRREVERSIBLE`.
+
+## Risk-state vector
+
+`compute_risk_state()` produces the underwriting vector
+`s = (α, β, η, g, v)` from [*AI-Native Insurance for Agentic AI*](https://arxiv.org/abs/2607.13230)
+(Zhu, NYU, arXiv:2607.13230), computed from records agperms already holds:
+
+```python
+from agperms import compute_risk_state
+
+state = compute_risk_state(fw, agent_subject_id)
+print(state.beta)            # 0.83 — fraction of actions run without approval
+print(state.eta_exposure)    # 9.0  — weighted permission exposure
+print(state.governance_tier) # 4    — of 5 checks agperms can verify
+print(state.to_dict())       # flat, for handing to an underwriter
+```
+
+| Component | Source | Honest status |
+|---|---|---|
+| **β** operational authority | audit log: actions run under non-approval-gated tokens ÷ all actions | **Measured.** This is the paper's own `β(T) = N_auto/N_total` estimator |
+| **η** permission exposure | granted scopes → weighted permission classes | **Measured**, with the paper's illustrative weights — override for your domain |
+| **g** governance tier | five checks agperms can verify about itself | **Partial.** See below |
+| **α** autonomy category | delegation depth + reversibility mix | **Heuristic** |
+| **v** dependency concentration | — | **Not observable. Caller-supplied or absent.** |
+
+### What this vector does NOT capture
+
+- **`v` cannot be computed here at all.** agperms has no concept of a model
+  provider, cloud region or connector vendor. Pass your own
+  `dependency_shares={...}` to get a Herfindahl concentration; omit it and both
+  dependency fields stay `None` rather than being invented.
+- **`α` is a heuristic, and `α(4)` is unreachable.** The paper's top category is
+  cyber-physical. A scope string cannot tell us whether it drives a robot arm, so
+  the ceiling here is 3 (multi-agent workflow).
+- **`g` scores only what agperms can verify about itself** — durable storage, a
+  supplied signing key, an intact audit chain, an empty review queue, a
+  configured approval gate. The paper's tier also covers red-teaming, incident
+  response, credential isolation and vendor risk management, none of which a
+  permission library can see. A high tier here is *not* an organisational
+  governance audit. `state.governance_evidence` returns the individual checks so
+  the number is auditable rather than trusted.
+- **`β` is `None`, not `0.0`, when no actions were observed.** Zero of zero
+  actions is unknown, not perfectly governed.
+- **None of this is a premium.** It is the input vector an underwriter would ask
+  for. Pricing needs the paper's calibration maps, which need claims data that
+  does not exist yet.
+
 ## Human approval for sensitive scopes
 
 Some scopes should never be delegated without a person looking. Those raise
@@ -259,13 +362,15 @@ that admits its edges.
 | `delegate(token, to=, scopes=, ttl_seconds=)` | Narrow it for a sub-agent |
 | `verify(token, scope) -> VerifyResult` | Check; returns a falsy result rather than raising |
 | `require(token, scope) -> TokenClaims` | Check; raises `Denied` |
-| `action(token, scope=, name=)` | Context manager for a side-effecting action |
+| `action(token, scope=, name=, reversibility=)` | Context manager for a side-effecting action |
 | `revoke(jti, reason=) -> RevocationResult` | Kill a capability and its whole subtree |
 | `approve(approval_id, approver=)` / `deny(...)` / `collect(...)` | Approval gate |
-| `pending_reviews()` / `resolve_review(id, note=, reviewed_by=)` | In-flight findings |
+| `pending_reviews(order_by_priority=)` / `resolve_review(id, note=, reviewed_by=)` | In-flight findings |
 | `chain(jti) -> list[ChainHop]` | Rebuild lineage from durable records |
 | `verify_audit_integrity() -> IntegrityReport` | Walk the hash chain |
 | `circuit_state()` / `reset_circuit()` | Breaker status and break-glass |
+| `compute_risk_state(fw, subject_id) -> RiskState` | Underwriting vector (module-level) |
+| `review_priority(action) -> int` | Review urgency, pure function (module-level) |
 
 ## License
 

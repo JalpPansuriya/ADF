@@ -438,6 +438,107 @@ un-revokes anything.
 
 ---
 
+## 2026-08-08: Reversibility is a second, separate scope map — not a richer `sensitive_scopes`
+**Decision**: Added `Reversibility` (IDEMPOTENT / REVERSIBLE / COMPENSABLE / IRREVERSIBLE,
+taxonomy from arXiv:2604.23283) and `Config.scope_reversibility`, a `dict[str, Reversibility]`
+kept deliberately separate from the existing flat `frozenset` `Config.sensitive_scopes`.
+`ActionRecord` carries a `reversibility` field, defaulting to IRREVERSIBLE.
+**Reason**: The two maps answer different questions — *must a human approve this grant*
+versus *how bad is it if it goes wrong* — and merging them loses information in a way that
+is easy to demonstrate. `spend_money` warrants an approval gate **and** is normally
+refundable, so it is COMPENSABLE; `transfer_funds` warrants the same gate and has no
+clawback, so it is IRREVERSIBLE. One map cannot express both facts without becoming a
+tuple, at which point it is two maps wearing one name. Keeping `sensitive_scopes` untouched
+also means every existing test and caller of `is_sensitive`/`sensitive_subset` is unaffected.
+**Rejected alternative**: (1) Replace `sensitive_scopes` with a `dict[str, ScopePolicy]`
+carrying both facts — rejected, it is a breaking change to a load-bearing public field for
+no behavioural gain. (2) Infer reversibility from sensitivity (sensitive ⇒ irreversible) —
+rejected, that is precisely the `spend_money` conflation above, and it would encode a wrong
+default as a rule. (3) Require reversibility at every `action()` call site with no config
+default — rejected, silent omission would be indistinguishable from a deliberate choice.
+**Constraint created**: An unclassified scope resolves to IRREVERSIBLE, not to a permissive
+default — same fail-closed logic as INV-15's refusal to read a missing closing record as
+CLEAN. Overriding `scope_reversibility` replaces the map wholesale rather than merging with
+the defaults, so a caller who overrides it loses the six built-in classifications; this is
+tested and documented rather than silently merged, because a partial merge would make it
+unclear which classification actually applied.
+
+---
+
+## 2026-08-08: `Reversibility` does not override comparison operators
+**Decision**: `Reversibility` exposes `.rank` and a module-level `worst_of(...)` helper.
+It deliberately does **not** implement `__lt__`/`__gt__`.
+**Reason**: It is a `str`-mixin enum, so `str.__lt__` and `str.__gt__` already exist and
+order members alphabetically — COMPENSABLE < IDEMPOTENT < IRREVERSIBLE < REVERSIBLE, which
+is not the severity order. A partial override is worse than none: defining only `__lt__`
+leaves `max()` (which uses `__gt__`) still answering alphabetically, which is exactly the
+bug the first implementation of this shipped and the test suite caught. Explicit
+`worst_of(...)` / `key=lambda r: r.rank` cannot be silently wrong.
+**Rejected alternative**: (1) Define `__lt__` only — rejected, that was the actual bug:
+`max()` returned REVERSIBLE from a set containing IRREVERSIBLE. (2) Define the full set of
+rich comparisons with `functools.total_ordering` — rejected, it would make `"COMPENSABLE" <
+Reversibility.IDEMPOTENT` behave differently from plain string comparison depending on
+operand order, which is a subtler trap than having no operators at all. (3) Drop the `str`
+mixin — rejected, string values are what make the enum serialisable into audit `detail`
+payloads and readable in a database column.
+**Constraint created**: `test_worst_of_returns_worst_case` pins the trap explicitly by
+asserting both that `worst_of` is right and that bare `max()` is wrong, so nobody
+"simplifies" the helper away.
+
+---
+
+## 2026-08-08: Risk-state vector computes three of five components and says so
+**Decision**: Added `agperms/risk.py` with `compute_risk_state()` returning a `RiskState`
+implementing `s = (α, β, η, g, v)` from arXiv:2607.13230 (Zhu, NYU). β and η are computed
+from the audit log and token metadata; g is a five-check self-assessment; α is an explicit
+heuristic capped at 3; v is caller-supplied or `None`. Pure read-only functions — no new
+`Storage` protocol methods, no schema change.
+**Reason**: The paper's components are meant to be observable, and agperms genuinely owns
+three of the inputs for the agents it governs: scope grants, the approval gate, and a
+hash-chained log of every action. β in particular has a published estimator
+(`β(T) = N_auto/N_total`) that maps directly onto existing `action_started` rows. Computing
+those honestly is real value. Fabricating the other two would not be.
+**Rejected alternative**: (1) Persist a running risk vector per subject, updated on every
+action — rejected, it adds protocol methods and two backend implementations to avoid a
+recomputation nobody has measured as slow, and a cached risk score that disagrees with the
+audit log is worse than no score. (2) Estimate `v` (dependency concentration) from
+something agperms can see — rejected, there is nothing: the library has no concept of a
+model provider or vendor, and inventing a proxy would be the exact overclaim this project
+avoids elsewhere. (3) Emit a premium or a single scalar risk score — rejected, pricing
+needs the paper's calibration maps, which need claims data that does not exist; a scalar
+would also hide which component drove it.
+**Constraint created**: `β` returns `None`, not `0.0`, when no actions were observed — 0/0
+is unknown, not "perfectly governed", and the flattering reading is the one to refuse.
+`α(4)` (cyber-physical) is unreachable by construction and tested as such: a scope string
+cannot establish that it actuates hardware. `governance_tier` returns its evidence dict
+alongside the number so the tier is auditable rather than trusted, and its docstring states
+plainly that it is not an organisational governance audit. An action whose token metadata
+is missing counts as *autonomous* in β, not approved — the unverifiable case must not
+improve the score.
+
+---
+
+## 2026-08-08: Counterfactual receipts designed but not implemented
+**Decision**: Proof-of-restraint receipts (signed attestation of what an agent did *not*
+do) were researched, designed, and deliberately deferred. Nothing was built.
+**Reason**: It is the only one of the three candidate features that requires a new hard
+dependency and a new trust model. agperms signs with HMAC (`HS256/384/512`), which means
+any party who can verify a receipt can also forge one. A receipt that an auditor, insurer
+or counterparty can verify needs asymmetric signing — Ed25519 — which is not in the stdlib
+and would make `cryptography` agperms' second hard dependency after PyJWT. It also raises
+an unresolved question the library cannot answer alone: who holds the public key, and how
+is it distributed. Shipping a receipt verifiable only by its own issuer would be
+theatre.
+**Rejected alternative**: (1) Sign receipts with the existing HMAC secret — rejected, a
+receipt anyone can forge attests to nothing; it would be strictly worse than no feature
+because it *looks* like evidence. (2) Ship the data model now and the signature later —
+rejected, an unsigned receipt has no security property, so there is nothing to ship.
+**Constraint created**: When implemented, it consumes `Config.scope_reversibility` — the
+restraint worth attesting is declining an action that was both *available* and
+IRREVERSIBLE. That dependency is why reversibility typing was built first.
+
+---
+
 <!-- AGENT REMINDER:
   - Entries here are decisions, not documentation of the obvious.
   - If you deviate from docs/PRD.md, you MUST add an entry explaining why.

@@ -303,6 +303,44 @@ with the project venv (`.\.venv\Scripts\python.exe`).
   is **single-process** (the Checkpoint Service remains necessary for shared authority —
   see DECISIONS.md 2026-08-08).
 
+### F17: Reversibility-typed scopes + insurable risk-state vector
+- **Behavior**: Two additions to `agperms`, layered so the second reads the first.
+  (1) **Reversibility typing**: every scope carries a recoverability class —
+  `IDEMPOTENT` / `REVERSIBLE` / `COMPENSABLE` / `IRREVERSIBLE` (taxonomy from
+  arXiv:2604.23283) — declared in `Config.scope_reversibility`, resolved at
+  `fw.action(...)` time with an optional per-call override, persisted on `ActionRecord`
+  through both storage backends, and written into the audit `detail` payload. Powers
+  `review_priority()` and `fw.pending_reviews(order_by_priority=True)`, so an `UNKNOWN`
+  funds transfer surfaces above a page of `UNKNOWN` calendar reads. (2) **Risk-state
+  vector**: `compute_risk_state(fw, subject_id)` returns the underwriting state
+  `s = (α, β, η, g, v)` from arXiv:2607.13230, computed read-only from the existing audit
+  log and token metadata — no new `Storage` protocol methods, no schema migration.
+- **Verification**: `pytest agperms/tests -q`
+- **State**: `passing`
+- **Evidence**: `430 passed in 1.72s` (up from 366; 64 new tests across
+  `test_reversibility.py` 23, `test_risk.py` 31, plus storage-conformance and
+  README-example additions). Hosted service unaffected: `848 passed in 44.08s`.
+  `python -m tests.check_boundaries` → `All 5 architectural boundary checks passed.`
+  Notable tests: an unclassified scope resolves to `IRREVERSIBLE` (fail-closed);
+  `spend_money` is `COMPENSABLE` while `transfer_funds` is `IRREVERSIBLE`, proving the two
+  maps cannot be merged; `β` is `None` rather than `0.0` when no actions were observed;
+  `α(4)` is unreachable by construction; a `NULL` reversibility column reads back as
+  `IRREVERSIBLE` rather than as safe; and `test_worst_of_returns_worst_case` pins the
+  str-enum comparison trap by asserting bare `max()` is *wrong*.
+- **Notes**: A real bug was caught during implementation and is now pinned by a test: the
+  first cut defined only `Reversibility.__lt__`, but `max()` dispatches on `__gt__`, which
+  the `str` mixin already supplies alphabetically — so `max()` returned `REVERSIBLE` from a
+  set containing `IRREVERSIBLE`. Fixed by removing the operator override entirely in favour
+  of an explicit `worst_of()` helper. Honest limitations, in the README and the module
+  docstring: of the five risk-state components only **β and η are measured**, **g** scores
+  only the five things agperms can verify about itself (not an organisational governance
+  audit), **α** is an explicit heuristic capped at 3, and **v** (dependency concentration)
+  is not observable by a permission library at all — caller-supplied or `None`, never
+  invented. The vector is an underwriting *input*, not a premium. Counterfactual receipts
+  were designed and deliberately deferred: they need Ed25519 (a second hard dependency)
+  and an unresolved key-distribution model, and an HMAC-signed receipt anyone can forge
+  would be theatre — see DECISIONS.md 2026-08-08.
+
 ---
 
 ## Completed Features
@@ -322,6 +360,7 @@ with the project venv (`.\.venv\Scripts\python.exe`).
 - [x] F14 README + results.md — regenerated from a real run
 - [x] F15 Boundary checks — `16 passed`
 - [x] F16 `agperms` embeddable library + in-flight forensics — `366 passed`
+- [x] F17 Reversibility-typed scopes + risk-state vector — `430 passed`
 
 **Not complete: F13 (docker compose) — `blocked`, never run.**
 

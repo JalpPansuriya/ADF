@@ -273,6 +273,7 @@ class MemoryStorage:
                 finished_at=finished_at,
                 state=state,
                 failure_reason=failure_reason,
+                reversibility=existing.reversibility,
             )
             self._actions[action_id] = updated
             return updated

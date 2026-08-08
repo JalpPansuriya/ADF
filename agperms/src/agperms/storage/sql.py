@@ -48,6 +48,7 @@ from agperms.models import (
     ActionReview,
     CompletionState,
     PendingApproval,
+    Reversibility,
     Subject,
     TokenMetadata,
 )
@@ -171,6 +172,10 @@ class _Action(_Base):
     finished_at: Mapped[_dt.datetime | None] = mapped_column(DateTime(timezone=True))
     state: Mapped[str | None] = mapped_column(String(16))
     failure_reason: Mapped[str | None] = mapped_column(String(500))
+    #: Nullable for rows written before reversibility typing existed. A NULL
+    #: reads back as IRREVERSIBLE, matching the fail-closed default rather than
+    #: silently reclassifying old actions as safe.
+    reversibility: Mapped[str | None] = mapped_column(String(16))
 
 
 class _Review(_Base):
@@ -602,6 +607,7 @@ class SqlStorage:
                     finished_at=action.finished_at,
                     state=action.state.value if action.state else None,
                     failure_reason=action.failure_reason,
+                    reversibility=action.reversibility.value,
                 )
             )
             try:
@@ -663,6 +669,11 @@ class SqlStorage:
             finished_at=as_utc(row.finished_at),
             state=CompletionState(row.state) if row.state else None,
             failure_reason=row.failure_reason,
+            reversibility=(
+                Reversibility(row.reversibility)
+                if row.reversibility
+                else Reversibility.IRREVERSIBLE
+            ),
         )
 
     # ------------------------------------------------------------------
