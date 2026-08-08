@@ -15,9 +15,14 @@ Redis cache), a LangGraph adapter package, a React dashboard, and a pytest eval 
 # Install (editable, with dev extras) — run from repo root
 pip install -e ".[dev]"
 pip install -e ./langgraph_adf_adapter
+pip install -e ./agperms
 
-# PRIMARY GATE: full eval harness (9 items, no Docker needed — SQLite + fakeredis)
-pytest -q
+# PRIMARY GATE: both suites must be green
+pytest -q                    # hosted service: 848 tests (SQLite + fakeredis)
+pytest agperms/tests -q      # embeddable library: 366 tests (memory + SQL)
+
+# Architectural boundary checks (AST-based)
+python -m tests.check_boundaries
 
 # Regenerate docs/results.md with real measured numbers
 python -m tests.generate_results

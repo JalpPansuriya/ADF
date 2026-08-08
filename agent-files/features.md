@@ -274,6 +274,37 @@ with the project venv (`.\.venv\Scripts\python.exe`).
 
 ---
 
+### F16: `agperms` — embeddable library with in-flight revocation forensics
+- **Behavior**: `pip install agperms` gives an in-process `Firewall` needing no server,
+  database or config. Enforces the same strict-subset narrowing, fail-closed revocation,
+  approval gate and hash-chained audit as the hosted service. Adds
+  `fw.action(token, scope=, name=)`: a context manager that lets a revoke classify each
+  in-flight action as `CLEAN` / `PARTIAL` / `UNKNOWN` and queue anything not-CLEAN for
+  human review, closed with a note that lands in the audit chain. Storage sits behind one
+  protocol with two conforming backends (`MemoryStorage`, `SqlStorage`). A LangGraph guard
+  auto-checkpoints every guarded node boundary.
+- **Verification**: `pytest agperms/tests -q`
+- **State**: `passing`
+- **Evidence**: `366 passed in 1.98s`. Includes the full CLEAN/PARTIAL/UNKNOWN matrix, a
+  pure-function INV-15 test asserting `UNKNOWN` is never `CLEAN`, a storage-bound test
+  (1,000 clean actions leave the review queue empty; 250 actions cost exactly 750 audit
+  rows), a conformance suite running every core flow against **both** backends, a
+  durability test proving revocation survives a new `SqlStorage` instance over the same
+  database, a test pinning the single-process limitation (two instances over one store
+  fork the audit chain), and executable tests for every README example (one of which
+  caught a real documentation bug — the intro delegated a sensitive scope and would have
+  raised).
+- **Notes**: The gap it fills is real and was verified by research: `adk-agentmesh`,
+  `wafers`, `warden`, `ScopeGate`, `MiniScope` and `legant` all answer "can this agent
+  still act?" after a revoke; none answers "what was it mid-way through?". The IETF draft
+  `draft-sato-soos-mad-02` specifies exactly this (`completion_state`, INV-15) with no
+  implementation. Honest limitations, stated in the README and the docstring: a revoke
+  **cannot interrupt** code already running (knowledge, not prevention), and the library
+  is **single-process** (the Checkpoint Service remains necessary for shared authority —
+  see DECISIONS.md 2026-08-08).
+
+---
+
 ## Completed Features
 <!-- These have already been verified and are immutable. -->
 - [x] F01 Config + secret hardening — `25 passed`
@@ -290,6 +321,7 @@ with the project venv (`.\.venv\Scripts\python.exe`).
 - [x] F12 React dashboard — tsc clean, build clean
 - [x] F14 README + results.md — regenerated from a real run
 - [x] F15 Boundary checks — `16 passed`
+- [x] F16 `agperms` embeddable library + in-flight forensics — `366 passed`
 
 **Not complete: F13 (docker compose) — `blocked`, never run.**
 

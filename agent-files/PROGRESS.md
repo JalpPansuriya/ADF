@@ -5,36 +5,58 @@
 # AGENT: This file is your memory across sessions. Keep it accurate.
 
 ## Repo State
-- Latest verified commit: **none — nothing has been committed**. Per user direction this
-  folder has no git repo of its own (it sits inside the `ML` folder, which is a repo for
-  the unrelated `Wholesale_Dealer_ERP` project). Do not stage or commit into the parent.
-- `pytest -q` status: **848 passed, 0 failed** (verified 2026-08-07, ~46s)
+- Latest verified commit: `9433082` (results-remote.md), remote
+  `https://github.com/JalpPansuriya/ADF.git`, branch `main`. The `agperms` library and the
+  Study Material folder are **on disk but not yet committed** — see Next Steps.
+- `pytest -q` status: **848 passed, 0 failed** (hosted service, verified 2026-08-08, ~49s)
+- `pytest agperms/tests -q` status: **366 passed, 0 failed** (embeddable library, ~2s)
 - `python -m tests.check_boundaries`: **all 5 checks pass**
 - `python -c "import checkpoint_service.main"`: **OK**
 - `cd dashboard && npx tsc --noEmit`: **0 errors**
 - `cd dashboard && npm run build`: **PASSING** (5 chunks, no size warnings)
 - `docs/results.md`: regenerated from a real run (841 tests via the per-target runner)
-- Last updated: 2026-08-07
+- `docs/results-remote.md`: generated from a live Supabase + Upstash run
+- Last updated: 2026-08-08
 
 ## Build Status
 - Python 3.12.10 in a **project-local venv at `.venv/`**. Use `.\.venv\Scripts\python.exe`.
   The venv exists because installing this project's pinned `pydantic==2.10.4` globally
   broke the user's other packages (langchain, google-genai, scrapegraphai need >=2.12.5).
   The global environment was restored; never `pip install` this project globally.
+- Three editable installs: `.` (service), `./langgraph_adf_adapter`, `./agperms`.
 - Node 24.14.1 / npm 11.11.0 — dashboard deps installed, typecheck and build both clean.
 - Docker 29.4.3 + Compose v5.1.4 available. `docker compose config -q` validates.
-- Primary gate is `pytest -q` (SQLite + fakeredis, no Docker needed).
+- Two primary gates now: `pytest -q` (service) and `pytest agperms/tests -q` (library).
 
 ## Current Active Feature
-- None. F01–F14 were built in one continuous bootstrap session at the user's explicit
-  request ("build everything in one go"), which suspended WIP=1 for that session only.
-- **WIP=1 now applies normally.** Any follow-up work must set exactly one
-  `not_started` feature in `features.md` to `active` before touching code.
+- None. F16 (`agperms`) is complete and passing.
+- **WIP=1 applies.** Any follow-up work must set exactly one `not_started`/`blocked`
+  feature in `features.md` to `active` before touching code. The only outstanding one is
+  F13 (docker compose).
 
 ## Recently Completed
-All fourteen features are `passing` with command output as evidence — see
-`features.md` for the per-feature verification and numbers. Headline results:
+All sixteen features are `passing` except F13 (blocked) — see `features.md` for
+per-feature verification and numbers. This session added F16:
 
+- [x] **F16: `agperms` embeddable library** — `pip install agperms` gives an in-process
+      `Firewall` with zero external dependencies. Answers the question the hosted service
+      could not ("how do I use this in my project?"), since both prior installables
+      assumed a running server.
+- [x] **In-flight revocation forensics** — `fw.action(...)` context manager; a revoke now
+      classifies open/failed actions as CLEAN/PARTIAL/UNKNOWN and queues non-CLEAN
+      findings for human review, closed with a note written into the hash chain.
+      Research confirmed no other *running* implementation does this — only the IETF draft
+      `draft-sato-soos-mad-02` specifies it, with no code.
+- [x] **Storage protocol + two backends** — `MemoryStorage` (default, no deps) and
+      `SqlStorage` (`agperms[sql]`), both run against one conformance suite so the SQL
+      path cannot drift from the in-memory one.
+- [x] **No module-level singletons in the library** — the service's `db/session.py` and
+      `db/redis_client.py` hold process-wide globals that make two instances clobber each
+      other; the library takes all state by construction, pinned by a test.
+- [x] **Executable README** — every documented example is a test. One of them caught a
+      real doc bug: the intro example delegated a sensitive scope and would have raised.
+
+Earlier sessions:
 - [x] Checkpoint Service: root/delegate/verify/revoke/approve/deny + audit + admin
       endpoints, strict-subset enforcement, hash-chained audit log, durable revocation.
 - [x] Eval harness, all 9 PRD items passing. 100% escalation block rate over 520
@@ -44,86 +66,115 @@ All fourteen features are `passing` with command output as evidence — see
 - [x] React dashboard (4 screens, 2s polling), typechecks and builds clean.
 - [x] Demo agents + `run_demo.py` executing all 7 PRD Section 11 steps, usable as a
       smoke test (non-zero exit if any security expectation fails).
-- [x] Docker Compose stack, Alembic migration, README security whitepaper,
-      generated `docs/results.md`.
+- [x] Live Supabase + Upstash verification, which found three real deployment bugs.
 - [x] Five AST-based architectural boundary checks, each with a meta-test proving the
       detector actually fires on a broken sample.
+- [x] Four study-material documents in `Study Material/`.
 
 ## In Progress (Not Yet Verified)
 - (nothing)
 
 ## Blocked
-- (nothing blocking)
+- **F13 (docker compose)** — never executed end to end; the user aborted the build. Only
+  `docker compose config -q` has passed.
 
 ## Known Issues
 <!-- Be specific. Vague issues help no one. -->
 1. **`docker compose up` was never executed** (the user aborted the build). So the
-   Layer-3 integration path is **unverified**: real Postgres, real Redis, the
-   entrypoint's migration step, and the dashboard container have not been exercised
-   together. `docker compose config -q` passes and the Alembic migration was applied
-   successfully against SQLite, but that is not the same thing. **This is the single
-   biggest known gap.** Run it before treating the stack as working.
-2. The primary gate runs on SQLite + fakeredis. Green tests do **not** prove the
-   Postgres/Redis path. Any change to `models/`, `engine/revocation.py` or
+   Layer-3 integration path is **unverified**: the containerised Postgres/Redis, the
+   entrypoint's migration step, the healthchecks and the nginx dashboard image have not
+   been exercised together. `docker compose config -q` passes and the live
+   Supabase/Upstash run is real evidence the *code* works against hosted Postgres/Redis,
+   but that is not the same claim. **Single biggest known gap.**
+2. **`agperms` is not published to PyPI.** The name was confirmed available (404 on the
+   PyPI JSON API); nothing has been uploaded. Publishing is irreversible and
+   world-visible, so it needs an explicit decision.
+3. **The service and the library are two implementations of the same rules.** Nothing
+   keeps them in sync but their two test suites. Collapsing `checkpoint_service` onto
+   `agperms` is the obvious follow-up and has not been done. Note this is a *duplication*
+   problem, not a redundancy one — the service is still needed (see below).
+4. **`agperms` is single-process.** Two `Firewall` instances over one shared store fork
+   the audit hash chain — measured, and pinned by
+   `test_two_instances_sharing_a_store_fork_the_chain`. Chain integrity needs one writer
+   computing `prev_hash` from the current tail, enforced by a `threading.Lock` that cannot
+   serialise across processes. This is why the service still exists; see DECISIONS.md
+   2026-08-08 ("The Checkpoint Service is kept").
+5. `agperms` in-memory storage is **not durable** — a restart resurrects revoked
+   capabilities. Documented prominently; `SqlStorage` is the answer.
+6. Checkpoints are **opt-in and manual** in the raw SDK. A forgotten `fw.action(...)`
+   means a revoke has nothing to classify. The LangGraph guard closes this at node
+   boundaries automatically.
+7. A revoke **cannot interrupt** code already executing inside a `with fw.action(...)`
+   block — nothing in-process can. Stated plainly in the README and the docstring: this
+   buys knowledge, not prevention.
+8. The primary gates run on SQLite + fakeredis / in-memory. Green tests do **not** prove
+   the Postgres/Redis path. Any change to `models/`, `engine/revocation.py` or
    `db/session.py` needs the Layer-3 check above.
-3. Latency numbers in `docs/results.md` are in-process (no network, no real Postgres).
-   They are a lower bound. Use `tests/locustfile.py` against a live stack for a
-   realistic figure; that has not been run either.
-4. `.env` in the repo root contains **real generated secrets** created for the compose
-   attempt. It is gitignored, but it exists on disk — rotate or delete it if this
-   directory is ever shared.
-5. v1 admin auth is one shared static key with no per-human identity and no rotation
-   flow beyond editing the env var and restarting. Documented in the README threat
-   model as the weakest link.
-6. `ADF_GUARDRAIL_EXEMPT_AGENTS` must be empty in production; an entry there is an
-   unthrottled identity. The compose file sets it to `""` explicitly.
-7. The audit hash chain is tamper-*evident*, not tamper-*proof*: an attacker with
-   unrestricted DB write access can recompute the chain from the break onward.
-   Mitigation (external notarisation of the chain tip) is documented, not implemented.
-8. `verify_success` audit rows are buffered, so a hard crash can lose up to
-   `ADF_AUDIT_BUFFER_MAX_SIZE` of them. Denials and mints are synchronous. This is a
-   deliberate, documented trade — see DECISIONS.md.
-9. No git history, so the ACID "one feature = one commit" checkpointing in
-   HARNESS_ENGINEERING Part 2 cannot be applied yet.
+9. Latency numbers in `docs/results.md` are in-process. `docs/results-remote.md` has the
+   network-inclusive figures (~250ms per backend round trip to Tokyo).
+10. `.env` in the repo root contains **real generated secrets** from the live-backend
+    session. It is gitignored, but exists on disk — rotate or delete if this directory is
+    ever shared.
+11. v1 admin auth is one shared static key with no per-human identity and no rotation
+    flow beyond editing the env var and restarting. Documented as the weakest link.
+12. `ADF_GUARDRAIL_EXEMPT_AGENTS` must be empty in production; an entry there is an
+    unthrottled identity. The compose file sets it to `""` explicitly.
+13. The audit hash chain is tamper-*evident*, not tamper-*proof*: unrestricted DB write
+    access allows recomputing the chain from a chosen point forward. Mitigation
+    (external notarisation of the tip) is documented, not implemented.
+14. Exception messages in `action_failed` rows are truncated to 200 chars and land in an
+    immutable log. Truncation bounds the blast radius; it does not sanitise.
+15. `verify_success` audit rows are buffered in the *service* (not the library), so a hard
+    crash can lose up to `ADF_AUDIT_BUFFER_MAX_SIZE` of them. Denials and mints are
+    synchronous. Deliberate, documented trade — see DECISIONS.md.
+
+## Settled Questions
+<!-- Things a future session might otherwise re-litigate. -->
+- **"Is the service still needed now that a library exists?" Yes.** Answered by
+  measurement: two library instances sharing one store break the audit chain at row 3.
+  Single process → library suffices. Multiple processes sharing one authority → the
+  service is the single writer. Also required for non-Python agents, the approvals/tree
+  UI, keeping the HS256 signing key off every verifier, and enforcing against an
+  untrusted agent process. Full reasoning and rejected alternatives in DECISIONS.md
+  2026-08-08.
 
 ## Next Steps
 <!-- Ordered. The next session starts at item 1. -->
-1. **Run the Layer-3 check** (Known Issue 1):
+1. **Commit and push `agperms/`**, the `Study Material/` folder, and the updated docs.
+   Nothing from this session is in git yet.
+2. **Run the Layer-3 check** (Known Issue 1):
    `docker compose up -d --build`, then `curl -fsS http://localhost:8000/health`,
    then `python demo_agents/run_demo.py --admin-key $ADF_ADMIN_API_KEY`, then open the
    dashboard at http://localhost:8080. Fix anything that breaks and record the result
    in F13's evidence.
-2. Run the real load test against that stack:
+3. Decide on **publishing `agperms` to PyPI** (Known Issue 2). Needs a PyPI account and
+   an explicit go-ahead; irreversible once uploaded.
+4. Consider **collapsing the hosted service onto `agperms`** (Known Issue 3) so the two
+   implementations of the same rules cannot drift.
+5. Run the real load test against a live stack:
    `locust -f tests/locustfile.py --host http://localhost:8000 --headless -u 50 -r 10 -t 60s`
-   and add the network-inclusive p95 to `docs/results.md` alongside the in-process one.
-3. Decide on version control (the user chose "build in place, no git init"). If that
-   changes, `git init` here and commit feature by feature.
-4. Optional hardening, in rough value order: RS256 + JWKS (removes the shared-secret
+6. Optional hardening, in rough value order: RS256 + JWKS (removes the shared-secret
    verifier problem), OIDC admin auth (gives `approved_by` a real identity), external
    notarisation of the audit chain tip.
 
 ## Decisions Made This Session
 <!-- Summary — full detail in DECISIONS.md -->
-Eleven decisions recorded, all of them resolving a PRD contradiction or a fail-open
-design. The security-relevant ones:
+Five new entries (2026-08-08), on top of the fourteen from earlier sessions:
 
-- **Verify order fixed**: signature is checked before any claim is read. PRD §7's
-  pseudocode reads `token.jti` from an unverified token.
-- **Revocation made durable**: Postgres is the source of truth, Redis is a cache
-  rebuilt at startup. PRD §8.4's Redis-only design fails **open** on restart.
-  A cache-readiness sentinel was added after a test caught exactly that fail-open.
-- **Approval gate mints on approval**: no JWT exists while a request is pending,
-  resolving the PRD §5 vs §7 contradiction.
-- **Opaque UUID subjects** in tokens with salted hashes in the audit log (PRD §8.6
-  beats §5's `"human:jalp"` example).
-- **Policy denials vs breaker faults separated**: a blocked escalation or a forged
-  token no longer counts as a system fault, because counting them let any client open
-  the circuit for everyone by spamming garbage.
-- **`verify_success` audit writes buffered** through a single background writer;
-  denials and mints stay synchronous.
-- Plus: guardrail-exempt allowlist for the benchmark, `max_depth` as an optional
-  per-root field, added `root_jti` claim, demo satisfies the approval gate rather than
-  bypassing it, and measured-not-asserted latency targets.
+- **`agperms` extracted as an embeddable library** with storage behind one protocol. The
+  existing service could not simply be imported: `db/session.py` and `db/redis_client.py`
+  hold process-wide mutable globals, so two instances clobber each other.
+- **One unit-atomic storage protocol, not two transaction lifecycles.** The service mixes
+  session-per-call with a self-owning transaction in `AuditLogger`; an in-memory backend
+  cannot implement both coherently.
+- **In-flight action checkpointing** — the genuine gap after researching six competing
+  projects (`adk-agentmesh`, `wafers`, `warden`, `ScopeGate`, `MiniScope`, `legant`) and
+  the IETF drafts. `UNKNOWN` is never treated as `CLEAN` (INV-15), pinned by a
+  pure-function test.
+- **Checkpoints are forensic, not preventive** — documented explicitly, because letting a
+  reader believe otherwise would stop them building the thing that actually protects them.
+- **Failure reasons truncated to 200 chars; review notes go in the hash chain**, not a
+  mutable column, so the conclusion and the evidence can be cross-checked.
 
 ---
 <!-- AGENT REMINDER:

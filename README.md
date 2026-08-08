@@ -68,6 +68,54 @@ Because narrowing is transitive, an agent that lost a scope one hop ago cannot
 re-grant it even though the root token had it. That is the case the tests hammer
 hardest — see `test_grandchild_cannot_regain_parent_scope`.
 
+## Two ways to use this
+
+| | **`agperms`** (embeddable library) | **Checkpoint Service** (`checkpoint_service/`) |
+|---|---|---|
+| Install | `pip install agperms` | `docker compose up --build` |
+| Needs | nothing — in-memory by default | Postgres + Redis |
+| Enforcement | Python calls (`fw.verify(...)`) | HTTP (`POST /tokens/verify`) |
+| Processes | **one** | many, sharing one authority |
+| Signing key | held by whoever verifies | held only by the service |
+| Dashboard | no | yes |
+
+**Which one?** Use the library if enforcement lives inside a single process. Use the
+service if any of these are true:
+
+- **More than one process or machine shares one audit chain.** The chain's integrity
+  depends on a single writer computing each row's hash from the current tail, enforced
+  by an in-process lock. Two library instances against one database **fork the chain** —
+  measured, not theorised. The service is that single writer.
+- **Agents are not all Python.** A Node or Go agent cannot `import agperms`; HTTP is the
+  only shared interface.
+- **You want the approvals queue or delegation-tree UI**, which are HTTP + React.
+- **The verifier must not hold the signing key.** HS256 means anyone who can verify can
+  also mint. Centralising verification keeps the key in one place instead of on every
+  service that checks a token.
+- **The agent's own process is untrusted.** A library called from inside that process can
+  be bypassed by it; a network boundary cannot.
+
+They are the embedded and shared-authority forms of the same rules, not alternatives.
+
+The library additionally implements **in-flight revocation forensics**: wrap
+side-effecting work in `fw.action(...)` and a revoke reports whether each open
+action was `CLEAN`, `PARTIAL` or `UNKNOWN`, rather than only telling you the token
+stopped working. See [`agperms/README.md`](agperms/README.md).
+
+```python
+from agperms import Firewall
+
+fw = Firewall()
+root = fw.mint_root(subject="alice", scopes=["read_calendar", "read_email"])
+child = fw.delegate(root.token, to="calendar-agent", scopes=["read_calendar"])
+
+with fw.action(child.token, scope="read_calendar", name="read_agenda"):
+    read_agenda()
+
+for review in fw.revoke(root.jti).reviews:
+    print(review.action_name, review.classification)
+```
+
 ## Quickstart
 
 ```bash
@@ -251,20 +299,25 @@ do not "fix" these back without reading the entry.
 ## Repository layout
 
 ```
-checkpoint_service/     FastAPI service
+checkpoint_service/     FastAPI service (hosted mode)
   config.py             settings; refuses to boot on weak/placeholder secrets
   models/               Pydantic token schema + SQLAlchemy tables
   engine/               token_engine, delegation_engine, revocation,
                         guardrails, audit_logger, subjects
   routes/               /tokens, /audit, /health + /admin
-langgraph_adf_adapter/  installable LangGraph integration (ADFGuard, ADFClient)
+agperms/                embeddable library (pip install agperms)
+  src/agperms/          Firewall facade, engines, models, errors
+    storage/            Storage protocol + MemoryStorage + SqlStorage
+    integrations/       LangGraph guard with automatic checkpointing
+  tests/                366 tests, both storage backends
+langgraph_adf_adapter/  HTTP client for the hosted service (ADFGuard, ADFClient)
 dashboard/              React + Vite + TS + Tailwind console (4 screens)
 demo_agents/            toy agents, run_demo.py (PRD §11), langgraph_demo.py
-tests/                  9 eval items + supporting suites, locustfile, results generator
+tests/                  848 tests: 9 eval items + supporting suites, locustfile
 migrations/             Alembic
 agent-files/            AGENTS.md, PROGRESS.md, features.md, DECISIONS.md,
                         HARNESS_ENGINEERING.md
-docs/                   PRD.md (original spec), results.md (generated)
+docs/                   PRD.md (original spec), results.md, results-remote.md
 ```
 
 Working on this codebase: start with [`agent-files/AGENTS.md`](agent-files/AGENTS.md).

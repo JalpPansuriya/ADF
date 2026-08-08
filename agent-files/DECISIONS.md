@@ -289,6 +289,155 @@ tune the test rather than the system.
 `python -m tests.generate_results` and state the hardware.
 
 ---
+## 2026-08-08: `agperms` extracted as an embeddable library; storage abstracted behind one protocol
+**Decision**: The enforcement engines were re-implemented as a standalone,
+pip-installable package (`agperms/`, published as `agperms`) that runs in-process with
+**zero external services**. Storage sits behind a single `Storage` protocol with two
+conforming backends: `MemoryStorage` (the dependency-free default) and `SqlStorage`
+(durable, `agperms[sql]`). The FastAPI service in `checkpoint_service/` is untouched and
+remains the hosted-mode deployment.
+**Reason**: "How does someone use this in their project?" had no good answer. Both
+existing installables assumed a running server: `agent-delegation-firewall` *is* the
+server, and `langgraph-adf-adapter` is an HTTP client for it. Nobody reaches for a
+permissions library expecting to stand up Postgres and Redis first. An embeddable core
+makes `pip install agperms` followed by `Firewall()` actually work.
+**Rejected alternative**: (1) Rename the HTTP adapter to `agperms` — rejected, it would
+still require a service, which is the problem. (2) Make the existing service importable
+as a library — rejected, `db/session.py` and `db/redis_client.py` hold process-wide
+mutable globals (`_engine`, `_SessionLocal`, `_client`, `_available`), so two instances
+in one process silently clobber each other's connections. A library cannot ship that.
+**Constraint created**: `agperms` must never import from `checkpoint_service`, and must
+keep working with `MemoryStorage` alone. Every engine takes its state by construction —
+no module-level singletons — which `test_revocation.py::test_two_firewalls_are_independent`
+pins down. New storage operations go in the protocol first, then both backends, then the
+conformance suite that runs every test against both.
+
+---
+
+## 2026-08-08: One unit-atomic storage protocol, not two transaction lifecycles
+**Decision**: Every `Storage` method is unit-atomic — the caller hands over a complete
+operation and the backend makes it durable before returning. There is no
+`begin()`/`commit()` in the protocol. Multi-row operations that must not tear
+(`revoke_many`, `append_audit_batch`) get their own dedicated method so the backend can
+make them atomic internally.
+**Reason**: The service this was extracted from has two incompatible lifecycles: most
+engines receive a `Session` per call and only `flush()`, while `AuditLogger` receives a
+`sessionmaker` and owns its own transaction end-to-end (the sole `session.commit()` in
+the engine layer). An in-memory backend cannot implement both coherently, and a protocol
+that exposes explicit transactions would force every backend to fake one.
+**Rejected alternative**: Expose a `UnitOfWork` context manager in the protocol —
+rejected as the wrong shape for an in-memory dict, and it would leak SQLAlchemy's
+transaction model into a contract that is supposed to be storage-agnostic.
+**Constraint created**: The BFS ordering of `descendants_breadth_first` is part of the
+contract, not an implementation detail — it is user-visible in `RevocationResult.revoked_jtis`
+and asserted per-backend. `is_revoked` must raise `StorageError` rather than return
+`False` when it cannot determine the answer: returning "probably fine" at exactly the
+moment the store is broken is the failure this library exists to prevent.
+
+---
+
+## 2026-08-08: In-flight action checkpointing (`fw.action`) — the genuine gap
+**Decision**: Added a context manager, `Firewall.action(token, scope=, name=)`, that
+records an action opening and closing. A revoke then classifies every action on the
+revoked subtree as `CLEAN`, `PARTIAL`, or `UNKNOWN` and queues anything not-CLEAN for
+human review. The classifier (`classify_action`) is a pure function so the rule is
+testable without a firewall, a store, or a clock.
+**Reason**: Research into the 2026 landscape found this space is now crowded —
+`adk-agentmesh` advertises "monotonic narrowing", `wafers` does append-only attenuation
+layers, `warden` does fail-closed retrieval with a tamper-evident trail, `ScopeGate`
+(arXiv 2606.28679) formally audits per-call authorization, `MiniScope` (arXiv 2512.11147)
+is the academic prior art, and `legant` ships RFC 8693 attenuation in Go. Every one of
+them, and ADF as originally built, answers only *"can this agent still act?"* after a
+revoke. None answers *"what was it in the middle of doing?"*. The IETF draft
+`draft-sato-soos-mad-02` names this exact gap and specifies `completion_state`
+CLEAN/PARTIAL/UNKNOWN with human escalation — but it is a paper spec with no
+implementation. This is a runnable, tested one.
+**Rejected alternative**: (1) A manual `fw.checkpoint()` call at safe points — rejected,
+too easy to forget, and a forgotten checkpoint silently degrades to UNKNOWN. A context
+manager cannot be half-used. (2) Making checkpoints also power a live "what is this agent
+doing now" dashboard feed — rejected as scope creep; it would need a queryable
+currently-open table with a different growth profile, and the revocation-safety case does
+not require it.
+**Constraint created**: `UNKNOWN` must never be treated as `CLEAN` (the draft's INV-15,
+implemented literally and pinned by `test_inv15_unknown_is_never_clean`). Action events
+are written **synchronously** — the *absence* of a closing row is what a revoke reads as
+"nothing was in flight", so it must be durable before the guarded code runs. `action()`
+verifies the capability on entry, so a revoked token cannot open an action at all.
+
+---
+
+## 2026-08-08: Checkpoints are forensic, not preventive — stated, not implied
+**Decision**: The docstring, the README, and the "What this does NOT do" section all say
+plainly that revoking a capability cannot interrupt code already executing inside a
+`with fw.action(...)` block.
+**Reason**: Nothing in-process can halt another running block, and a security library
+that lets a reader believe otherwise is worse than one with no feature at all — the
+reader would stop building the thing that actually protects them. `legant`'s own
+`REVOCATION.md` is comparably blunt ("no zero-latency offline revocation… the feed does
+not authenticate or authorize — it only denies"), and that honesty is the standard worth
+matching.
+**Rejected alternative**: Describing `action()` as a "kill switch" or "interrupt" —
+rejected as false.
+**Constraint created**: Any future doc or pitch for this feature must keep the
+distinction between *knowledge* and *prevention* explicit. It buys you an answer to
+"what happened", not the ability to stop it.
+
+---
+
+## 2026-08-08: The Checkpoint Service is kept; the library does not replace it
+**Decision**: Both `agperms` (embeddable) and `checkpoint_service/` (hosted) stay. The
+library is the single-process form; the service is the shared-authority form.
+**Reason**: The question "now that we have a library, is the service still needed?" was
+answered with a measurement rather than an opinion. Two `Firewall` instances writing to one
+shared `SqlStorage`, with interleaved writes, **break the audit hash chain at row 3**
+(`intact=False`, `prev_hash does not match the previous row's row_hash`). This is not a
+fixable defect: chain integrity requires one writer computing `prev_hash` from the current
+tail, `agperms` enforces that with a `threading.Lock`, and a lock cannot serialise across
+processes. So a single process needs no service, and two processes sharing one authority
+need exactly what the service is -- the one writer everyone else calls.
+Four further cases keep it necessary: non-Python agents cannot `import agperms` and need
+HTTP; the approvals queue and delegation-tree UI are HTTP + React; HS256 means any verifier
+can also mint, so centralising verification keeps the signing key off every service that
+merely checks a token; and a library called from inside an untrusted agent process can be
+bypassed by that process, whereas a network boundary cannot.
+**Rejected alternative**: (1) Delete the service and ship only the library -- rejected, it
+would silently corrupt the audit chain in any multi-replica deployment, which is the exact
+guarantee the project exists to provide. (2) Make the library multi-process safe with an
+advisory lock or `SELECT ... FOR UPDATE` on the chain tail -- viable, but it turns a
+zero-dependency library into one that requires a specific database's locking semantics,
+and it re-serialises every write through the database anyway, which is what the service
+already does more explicitly.
+**Constraint created**: `agperms` documents "one process only" prominently, with the
+measured failure. Any future claim that the library supersedes the service must first show
+a multi-process integrity test passing. The real duplication problem -- two implementations
+of the same rules, kept in sync only by two test suites -- is tracked as PROGRESS.md Known
+Issue 3, and the fix is to make the service import the library rather than reimplement it.
+
+---
+
+## 2026-08-08: Failure reasons truncated to 200 characters; review notes go in the chain
+**Decision**: `action_failed` rows store `truncate_reason(f"{type(exc).__name__}: {exc}")`,
+capped at 200 characters with whitespace collapsed. `resolve_review(...)` requires a
+non-empty `note`, and that note is written as its own hash-chained `review_resolved`
+audit row rather than only onto the mutable review record.
+**Reason**: Two different problems. An unbounded exception message in an append-only log
+is both a storage issue and a disclosure risk, and 200 characters keeps the type name and
+the useful head of the message while bounding both. Separately, a human's finding is the
+part an auditor or insurer would actually want, so it belongs in the tamper-evident
+record; the `pending_review` row is a lookup cache of a *conclusion* and the chain is the
+*evidence*, and keeping the note in only one place means they can be cross-checked
+instead of trusted blindly.
+**Rejected alternative**: (1) Store only the exception type and discard the message —
+rejected, it throws away the detail that makes a PARTIAL finding actionable. (2) A `note`
+column on `pending_review` — rejected, two copies of "what the human said" can disagree,
+and the mutable one is the weaker record.
+**Constraint created**: Truncation bounds the blast radius, it does not sanitise — the
+README says so, because a developer whose exception text embeds a card number would still
+leak it within the 200-char window. `resolve_review` records a conclusion and never
+un-revokes anything.
+
+---
+
 <!-- AGENT REMINDER:
   - Entries here are decisions, not documentation of the obvious.
   - If you deviate from docs/PRD.md, you MUST add an entry explaining why.

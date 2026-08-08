@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agperms"
+version = "0.1.0"
+description = "Capability narrowing and in-flight revocation forensics for multi-agent AI systems"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+keywords = [
+    "ai-agents", "authorization", "delegation", "capability",
+    "least-privilege", "multi-agent", "revocation", "audit",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
+
+# Deliberately minimal. `pip install agperms` must work with no server, no
+# database and no cache: the default MemoryStorage backend has zero external
+# dependencies. PyJWT is the only hard requirement because signed tokens are
+# the whole point.
+dependencies = [
+    "PyJWT>=2.9,<3",
+]
+
+[project.optional-dependencies]
+# Durable storage. Only needed if you want revocation state to survive a
+# process restart -- see the fail-closed caveat in the README.
+sql = [
+    "SQLAlchemy>=2.0,<3",
+]
+postgres = [
+    "SQLAlchemy>=2.0,<3",
+    "psycopg[binary]>=3.2,<4",
+]
+# Shared rate-limit / revocation cache across processes.
+redis = [
+    "redis>=5,<7",
+]
+dev = [
+    "pytest>=8,<9",
+    "SQLAlchemy>=2.0,<3",
+]
+
+[project.urls]
+Homepage = "https://github.com/JalpPansuriya/ADF"
+Repository = "https://github.com/JalpPansuriya/ADF"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+agperms = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning"]
